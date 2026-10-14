@@ -1,0 +1,10 @@
+pandas>=2
+numpy
+streamlit
+matplotlib
+openai
+python-dotenv
+scikit-learn
+anthropic
+huggingface_hub
+xlrd
