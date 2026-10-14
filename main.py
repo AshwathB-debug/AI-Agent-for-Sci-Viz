@@ -42,7 +42,8 @@ canvas_lock = get_canvas_lock()
 st.set_page_config(page_title="AI Data Viz Agent", layout="wide")
 
 
-DATA_DIR = Path(os.getenv("DATA_DIR", Path(__file__).parent / "data"))
+DATA_DIR = Path(os.getenv("DATA_DIR", "/tmp/data"))
+# os.makedirs(DATA_DIR, exist_ok=True)
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 FEEDBACK_LOG = DATA_DIR / "feedback.jsonl"
 RUN_LOG = DATA_DIR / "runs.jsonl"

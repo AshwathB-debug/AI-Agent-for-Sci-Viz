@@ -2,18 +2,17 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-# Install system build dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends build-essential && rm -rf /var/lib/ats/lists/*
+# 1. System build dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends build-essential && rm -rf /var/lib/apt/lists/*
 
-# Copy and install Python packages
+# 2. Install Python dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the rest of the application code
+# 3. Copy app code
 COPY . .
 
-# Expose port 8080 for AWS App Runner
 EXPOSE 8080
 
-# Run Streamlit on port 8080
-CMD ["streamlit", "run", "main_7.py", "--server.port=8080", "--server.address=0.0.0.0"]
+# 4. Streamlit launch command
+CMD ["streamlit", "run", "main.py", "--server.port=8080", "--server.address=0.0.0.0", "--server.headless=true", "--server.enableWebsocketCompression=false"]
