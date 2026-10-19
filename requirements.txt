@@ -8,3 +8,4 @@ scikit-learn
 anthropic
 huggingface_hub
 xlrd
+boto3

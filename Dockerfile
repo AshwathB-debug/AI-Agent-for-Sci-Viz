@@ -15,4 +15,4 @@ COPY . .
 EXPOSE 8080
 
 # 4. Streamlit launch command
-CMD ["streamlit", "run", "main.py", "--server.port=8080", "--server.address=0.0.0.0", "--server.headless=true", "--server.enableWebsocketCompression=false"]
+CMD ["streamlit", "run", "main.py", "--server.port=8080", "--server.address=0.0.0.0"]

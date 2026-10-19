@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import json
 import os
+import boto3
 import re
 import ast
 import signal
@@ -111,6 +112,25 @@ if _admin:  # no ADMIN_CODE set = admin panel doesn't exist
 #     FEEDBACK_DIR = Path("/tmp/viz_agent_feedback")
 # FEEDBACK_DIR.mkdir(parents=True, exist_ok=True)
 # FEEDBACK_LOG = FEEDBACK_DIR / "feedback.jsonl"
+
+
+
+def uploadLogToS3(local_file_path, s3_bucket_name, s3_file_name):
+    
+    s3 = boto3.client('s3')
+    
+    try:
+        # Read the local JSONL file and turn into a Pandas DataFrame
+        df = pd.read_json(local_file_path, lines = True)
+        
+        # 2. Convert it to a temporary local CSV file
+        csv_local_path = '/tmp/runs_output.csv'
+        df.to_csv(csv_local_path, index=False)
+        
+        s3.upload_file(csv_local_path, s3_bucket_name, s3_file_name)
+        
+    except Exception as e:
+        print(f"Failed to upload to S3: {e}")
 
 
 
@@ -375,6 +395,9 @@ def log_run(run_id, prompt, plan, code, ok, seconds, df, attempts):
         }
         with open(RUN_LOG, "a") as f:
             f.write(json.dumps(rec) + "\n")
+            
+        # 👉 CALLS uploadLogToS3 HERE: Immediately back up the log to S3 after every run
+        uploadLogToS3(str(RUN_LOG), "ai-agent-metrics-bucket", "runs.jsonl")
     except Exception as e:
         print(f"[log_run failed] {type(e).__name__}: {e}", flush=True)
     
@@ -435,8 +458,8 @@ def make_example_dataset(name: str) -> Tuple[pd.DataFrame, str]:
 # BLOCK 8: STREAMLIT UI
 # ==========================================
 st.title("📊 Visualize your data in just a few steps!")
-st.info("Upload a dataset, describe the chart you want (be as specific as possible), and iterate. Three specialized LLM agents (Thinker → Coder → Debugger) collaborate on every request. Powered by Qwen.")
-st.info("ℹ️ Beta: prompts and generated code are logged, and column names/sample values are sent to a third-party AI model. Please don't upload sensitive data.")
+st.info("Upload a dataset, describe the chart you want (BE AS SPECIFIC AS POSSIBLE. e.g. mention chart types for better results), and iterate. Three specialized LLM agents (Thinker → Coder → Debugger) collaborate on every request. Powered by Qwen.")
+st.info("ℹ️ Beta: prompts and generated code are logged for calculating metrics, and column names/sample values are sent to a third-party AI model. Please don't upload sensitive data.")
 # st.info("")
 
 # Session state init
@@ -640,7 +663,7 @@ with st.sidebar:
         st.markdown("""
         **Workflow**
         1. **Load data** — upload a file or pick an example.
-        2. **Describe** the chart — mention chart type and column names if you know them.
+        2. **Describe** the chart — mention chart type and column names if you know them. Be as specific as possible.
         3. **Run** — the agent plans, writes code, and executes it (with up to 3 debug retries).
         4. **Refine** — tick 🔁 Refine and send a follow-up like "log-scale the y-axis".
 
