@@ -40,7 +40,11 @@ canvas_lock = get_canvas_lock()
 # ==========================================
 # BLOCK 0: CONFIG & PATHS & ACCESS
 # ==========================================
-st.set_page_config(page_title="AI Data Viz Agent", layout="wide")
+st.set_page_config(
+    page_title = "AI Data Viz Agent", 
+    page_icon = "robotfavicon2.png",
+    layout = "wide"
+)
 
 
 DATA_DIR = Path(os.getenv("DATA_DIR", "/tmp/data"))
@@ -396,8 +400,19 @@ def log_run(run_id, prompt, plan, code, ok, seconds, df, attempts):
         with open(RUN_LOG, "a") as f:
             f.write(json.dumps(rec) + "\n")
             
-        # 👉 CALLS uploadLogToS3 HERE: Immediately back up the log to S3 after every run
-        uploadLogToS3(str(RUN_LOG), "ai-agent-metrics-bucket", "runs.jsonl")
+        # 1. Track local run counts in session state
+        st.session_state.setdefault("runs_since_last_upload", 0)
+        st.session_state.runs_since_last_upload += 1
+        
+        # 2. Define your batch threshold (e.g., upload every 5 runs)
+        BATCH_THRESHOLD = 5 
+        
+        if st.session_state.runs_since_last_upload >= BATCH_THRESHOLD:
+            uploadLogToS3(str(RUN_LOG), "ai-agent-metrics-bucket", "runs.csv")
+            # Reset the counter after a successful batch upload
+            st.session_state.runs_since_last_upload = 0
+            print(f"[S3 Sync] Uploaded batch of {BATCH_THRESHOLD} runs to S3.")
+            
     except Exception as e:
         print(f"[log_run failed] {type(e).__name__}: {e}", flush=True)
     
