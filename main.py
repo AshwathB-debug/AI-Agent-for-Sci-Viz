@@ -120,21 +120,45 @@ if _admin:  # no ADMIN_CODE set = admin panel doesn't exist
 
 
 def uploadLogToS3(local_file_path, s3_bucket_name, s3_file_name):
-    
-    s3 = boto3.client('s3')
+    s3 = boto3.client('s3', region_name='us-east-2')
     
     try:
-        # Read the local JSONL file and turn into a Pandas DataFrame
-        df = pd.read_json(local_file_path, lines = True)
-        
-        # 2. Convert it to a temporary local CSV file
+        # 1. Read the local JSONL run logs into a DataFrame
+        if not Path(local_file_path).exists():
+            return
+        local_df = pd.read_json(local_file_path, lines=True)
+        if local_df.empty:
+            return
+            
+        # 2. Attempt to download the existing runs.csv from S3 (if it exists)
+        s3_df = pd.DataFrame()
+        try:
+            response = s3.get_object(Bucket=s3_bucket_name, Key=s3_file_name)
+            s3_df = pd.read_csv(io.BytesIO(response['Body'].read()))
+        except s3.exceptions.NoSuchKey:
+            # S3 file doesn't exist yet on the first run; this is completely normal.
+            pass
+        except Exception as e:
+            print(f"[S3 Warning] Could not fetch existing runs.csv from S3: {e}")
+
+        # 3. Combine existing S3 data with local data and deduplicate by 'run_id'
+        if not s3_df.empty:
+            combined_df = pd.concat([s3_df, local_df], ignore_index=True)
+            if 'run_id' in combined_df.columns:
+                # Keep the latest version of a run if it somehow appeared twice
+                combined_df = combined_df.drop_duplicates(subset=['run_id'], keep='last')
+        else:
+            combined_df = local_df
+
+        # 4. Write to a temporary local path and upload back to S3
         csv_local_path = '/tmp/runs_output.csv'
-        df.to_csv(csv_local_path, index=False)
+        combined_df.to_csv(csv_local_path, index=False)
         
         s3.upload_file(csv_local_path, s3_bucket_name, s3_file_name)
-        
+        print(f"[S3 Sync] Successfully updated {s3_file_name} in bucket {s3_bucket_name} with {len(combined_df)} total rows.")
+
     except Exception as e:
-        print(f"Failed to upload to S3: {e}")
+        print(f"Failed to upload to S3: {e}", flush=True)
 
 
 
@@ -404,8 +428,8 @@ def log_run(run_id, prompt, plan, code, ok, seconds, df, attempts):
         st.session_state.setdefault("runs_since_last_upload", 0)
         st.session_state.runs_since_last_upload += 1
         
-        # 2. Define your batch threshold (e.g., upload every 5 runs)
-        BATCH_THRESHOLD = 5 
+        # 2. Define your batch threshold (e.g., upload every 2 runs)
+        BATCH_THRESHOLD = 2 
         
         if st.session_state.runs_since_last_upload >= BATCH_THRESHOLD:
             uploadLogToS3(str(RUN_LOG), "ai-agent-metrics-bucket", "runs.csv")

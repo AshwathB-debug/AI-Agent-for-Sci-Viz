@@ -76,12 +76,15 @@ class Qwen:
 
     @staticmethod
     def _clean(text: str) -> str:
-        
         if not text:
             return text
         cleaned = text.strip()
-        cleaned = re.sub(r"```(?:json|python)?", "", cleaned, flags = re.IGNORECASE)
-        cleaned = re.sub(r"<think>.*?(</think>|$)", "", cleaned, flags = re.DOTALL)
+        # Strip out markdown code blocks
+        cleaned = re.sub(r"```(?:json|python)?", "", cleaned, flags=re.IGNORECASE)
+        # Strip out any <think> ... </think> or <reasoning_process> ... </reasoning_process> blocks
+        cleaned = re.sub(r"<think>.*?</think>", "", cleaned, flags=re.DOTALL)
+        cleaned = re.sub(r"<reasoning_process>.*?</reasoning_process>", "", cleaned, flags=re.DOTALL)
+        cleaned = re.sub(r"<reasoning>.*?</reasoning>", "", cleaned, flags=re.DOTALL)
         cleaned = cleaned.replace("```", "").strip()
         return cleaned
 
@@ -99,7 +102,7 @@ class Qwen:
             """
 
         system_msg = f"""
-        You are a Data Visualization Architect. Output ONLY valid JSON — no prose, no markdown fences.
+        You are a Data Visualization Architect. Output ONLY valid JSON — no prose, no markdown fences, and NO <reasoning_process> or <think> tags in the final output text. Keep all reasoning internal.
 
         Before choosing the chart, fill the "reasoning" field by walking through:
         <reasoning_process>
