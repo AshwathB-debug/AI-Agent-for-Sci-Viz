@@ -132,47 +132,42 @@ def uploadLogToS3(local_file_path, s3_bucket_name, s3_file_name):
     s3 = boto3.client('s3', region_name='us-east-2')
     
     try:
-        # 1. Read the local JSONL run logs into a DataFrame
+        # 1. Read local JSONL logs
         if not Path(local_file_path).exists():
             return
         
-        # local_df = pd.read_json(local_file_path, lines=True)
         local_df = pd.read_json(local_file_path, lines=True, dtype={"run_id": str, "session_id": str, "user": str})
         if local_df.empty:
             return
             
-        # 2. Attempt to download the existing runs.csv from S3 (if it exists)
+        # 2. Attempt to download existing file from S3 using the variable s3_file_name
         s3_df = pd.DataFrame()
         try:
-            response = s3.get_object(Bucket=s3_bucket_name, Key=s3_file_name)
-            # s3_df = pd.read_csv(io.BytesIO(response['Body'].read()))
+            response = s3.get_object(Bucket=s3_bucket_name, Key=s3_file_name)  # ✅ Fixed: dynamic key
             s3_df = pd.read_csv(io.BytesIO(response['Body'].read()), dtype={"run_id": str, "session_id": str, "user": str})
         except s3.exceptions.NoSuchKey:
-            # S3 file doesn't exist yet on the first run; this is completely normal.
-            pass
+            # ✅ First time creating mvpruns.csv in S3 - continue execution!
+            print(f"[S3 Info] {s3_file_name} does not exist in S3 yet. Creating new file.")
         except Exception as e:
-            print(f"[S3 Warning] Could not fetch existing mvpruns.csv from S3: {e}")
-            return
+            print(f"[S3 Warning] Error fetching {s3_file_name}: {e}")
 
-        # 3. Combine existing S3 data with local data and deduplicate by 'run_id'
+        # 3. Combine S3 data and local data, deduplicating on run_id
         if not s3_df.empty:
             combined_df = pd.concat([s3_df, local_df], ignore_index=True)
             if 'run_id' in combined_df.columns:
-                # Keep the latest version of a run if it somehow appeared twice
                 combined_df = combined_df.drop_duplicates(subset=['run_id'], keep='last')
         else:
             combined_df = local_df
 
-        # 4. Write to a temporary local path and upload back to S3
+        # 4. Write CSV locally and upload to S3
         csv_local_path = '/tmp/runs_output.csv'
         combined_df.to_csv(csv_local_path, index=False)
         
         s3.upload_file(csv_local_path, s3_bucket_name, s3_file_name)
-        print(f"[S3 Sync] Successfully updated {s3_file_name} in bucket {s3_bucket_name} with {len(combined_df)} total rows.")
+        print(f"[S3 Sync] Successfully updated {s3_file_name} in bucket {s3_bucket_name} with {len(combined_df)} rows.")
 
     except Exception as e:
         print(f"Failed to upload to S3: {e}", flush=True)
-        return
 
 
 # ==========================================
@@ -573,7 +568,7 @@ def make_example_dataset(name: str) -> Tuple[pd.DataFrame, str]:
 # BLOCK 8: STREAMLIT UI
 # ==========================================
 st.title("📊 Visualize your data in just a few steps!")
-st.info("Upload a dataset, describe the chart you want (BE AS SPECIFIC AS POSSIBLE. e.g. mention chart types for better results), and iterate. Three specialized LLM agents (Thinker → Coder → Debugger) collaborate on every request. Powered by Qwen.")
+st.info("Upload a dataset, describe the chart you want (BE AS SPECIFIC AS POSSIBLE. e.g. mention chart types for better results), and click 'Run!' Three specialized LLM agents (Thinker → Coder → Debugger) collaborate on every request. Powered by Qwen.")
 st.warning("ℹ️ Beta: Specific variables are logged for calculating metrics (e.g. prompt length and success rate), and column names/sample values are sent to a third-party AI model (AI providers may retain requests under their own policies). Please don't upload sensitive data.")
 
 
@@ -831,7 +826,7 @@ with st.sidebar:
     if not df_loaded:
         st.caption("_Load data first to enable Run._")
     elif not user_prompt.strip():
-        st.caption("_Enter a prompt to enable Run._")
+        st.caption("_Enter a prompt in Step 2 to enable Run._")
 
     if st.session_state.history:
         if st.button("🧹 Clear history", use_container_width=True):
