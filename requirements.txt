@@ -9,3 +9,4 @@ anthropic
 huggingface_hub
 xlrd
 boto3
+st-copy-button

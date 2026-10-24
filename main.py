@@ -1,4 +1,5 @@
 import streamlit as st
+# from st_copy_button import st_copy_button
 import pandas as pd
 import numpy as np
 import json
@@ -52,13 +53,14 @@ DATA_DIR = Path(os.getenv("DATA_DIR", "/tmp/data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 FEEDBACK_LOG = DATA_DIR / "feedback.jsonl"
 RUN_LOG = DATA_DIR / "runs.jsonl"
-st.session_state.setdefault("sid", uuid.uuid4().hex[:8])
+PROMPT_VERSION = "v2-intent-first"   # bump whenever you edit the Thinker/Coder/Debugger prompts
+st.session_state.setdefault("session_id", uuid.uuid4().hex[:8])
 
 
 def _read_log(path: Path) -> pd.DataFrame:
     if not path.exists():
         return pd.DataFrame()
-    return pd.read_json(path, lines=True, dtype={"run_id": str, "sid": str, "user": str})
+    return pd.read_json(path, lines=True, dtype={"run_id": str, "session_id": str, "user": str})
 
 
 # Gatekeeping for access to AI agent
@@ -73,7 +75,7 @@ if not st.session_state.get("ok"):
     
     
 if "user" not in st.session_state:
-    name = st.text_input("Your first name or nickname")
+    name = st.text_input("Your first name")
     if name.strip():
         st.session_state.user = name.strip().lower()[:30]; st.rerun()
     st.stop()
@@ -85,14 +87,21 @@ if _admin:  # no ADMIN_CODE set = admin panel doesn't exist
         entered = st.text_input("Admin code", type="password", key="admin_code")
         if entered and hmac.compare_digest(entered, _admin):
             runs, fb = _read_log(RUN_LOG), _read_log(FEEDBACK_LOG)
+            runs = runs.drop_duplicates("run_id", keep="last")
+            
             if runs.empty:
                 st.caption("No runs logged yet.")
             else:
                 st.metric("Runs", len(runs))
-                st.metric("Success rate", f"{runs['success'].mean():.0%}")
+                if "refused" not in runs:
+                    runs["refused"] = 0   
+                runs["refused"] = runs["refused"].fillna(0)
+                valid = runs[runs["refused"] == 0]
+                st.metric("Success rate", f"{valid['success'].mean():.0%}" if len(valid) else "n/a")
+                st.metric("Refusals", int(runs["refused"].sum()))
                 st.metric("Testers", runs["user"].nunique())
-                st.download_button("⬇️ runs.csv", runs.to_csv(index=False),
-                                   "runs.csv", "text/csv", key="dl_runs")
+                st.download_button("⬇️ mvpruns.csv", runs.to_csv(index=False),
+                                   "mvpruns.csv", "text/csv", key="dl_runs")
             if not fb.empty:
                 st.download_button("⬇️ feedback.csv", fb.to_csv(index=False),
                                    "feedback.csv", "text/csv", key="dl_fb")
@@ -126,7 +135,9 @@ def uploadLogToS3(local_file_path, s3_bucket_name, s3_file_name):
         # 1. Read the local JSONL run logs into a DataFrame
         if not Path(local_file_path).exists():
             return
-        local_df = pd.read_json(local_file_path, lines=True)
+        
+        # local_df = pd.read_json(local_file_path, lines=True)
+        local_df = pd.read_json(local_file_path, lines=True, dtype={"run_id": str, "session_id": str, "user": str})
         if local_df.empty:
             return
             
@@ -134,12 +145,14 @@ def uploadLogToS3(local_file_path, s3_bucket_name, s3_file_name):
         s3_df = pd.DataFrame()
         try:
             response = s3.get_object(Bucket=s3_bucket_name, Key=s3_file_name)
-            s3_df = pd.read_csv(io.BytesIO(response['Body'].read()))
+            # s3_df = pd.read_csv(io.BytesIO(response['Body'].read()))
+            s3_df = pd.read_csv(io.BytesIO(response['Body'].read()), dtype={"run_id": str, "session_id": str, "user": str})
         except s3.exceptions.NoSuchKey:
             # S3 file doesn't exist yet on the first run; this is completely normal.
             pass
         except Exception as e:
-            print(f"[S3 Warning] Could not fetch existing runs.csv from S3: {e}")
+            print(f"[S3 Warning] Could not fetch existing mvpruns.csv from S3: {e}")
+            return
 
         # 3. Combine existing S3 data with local data and deduplicate by 'run_id'
         if not s3_df.empty:
@@ -159,7 +172,7 @@ def uploadLogToS3(local_file_path, s3_bucket_name, s3_file_name):
 
     except Exception as e:
         print(f"Failed to upload to S3: {e}", flush=True)
-
+        return
 
 
 # ==========================================
@@ -175,6 +188,13 @@ BANNED_NAMES = {
     'input', 'breakpoint', 'globals', 'vars', 'getattr', 'setattr', 'delattr',
 }
 
+BANNED_ATTRS = {
+    'os', 'sys', 'environ', 'getenv', 'system', 'popen', 'subprocess',
+    'savefig', 'imread', 'imsave', 'urlopen', 'loadtxt', 'savetxt',
+    'genfromtxt', 'fromfile', 'tofile',
+    'to_csv', 'to_excel', 'to_json', 'to_pickle', 'to_parquet', 'to_sql',
+}
+
 
 def validate_code_safety(code: str) -> Tuple[bool, str]:
     """Static AST check for dangerous patterns. Not a full sandbox — pair with a timeout."""
@@ -188,13 +208,19 @@ def validate_code_safety(code: str) -> Tuple[bool, str]:
             for alias in node.names:
                 if alias.name.split('.')[0] in BANNED_MODULES:
                     return False, f"Banned import: {alias.name}"
+        if isinstance(node, ast.While):
+            return False, "while loops are not allowed"
         if isinstance(node, ast.ImportFrom):
             if node.module and node.module.split('.')[0] in BANNED_MODULES:
                 return False, f"Banned import from: {node.module}"
         if isinstance(node, ast.Name) and node.id in BANNED_NAMES:
             return False, f"Banned name reference: {node.id}"
         if isinstance(node, ast.Attribute):
-            if node.attr.startswith('__') and node.attr.endswith('__') and node.attr != '__init__':
+            if node.attr in BANNED_ATTRS or node.attr.startswith('read_'):
+                return False, f"Blocked attribute: {node.attr}"
+            
+            ALLOWED_DUNDERS = {'__init__', '__name__'}
+            if node.attr.startswith('__') and node.attr.endswith('__') and node.attr not in ALLOWED_DUNDERS:
                 return False, f"Dunder attribute access blocked: {node.attr}"
     return True, "OK"
 
@@ -315,7 +341,12 @@ def run_pipeline(df: pd.DataFrame, df_summary: str, user_prompt: str,
                  previous_code: Optional[str] = None,
                  max_retries: int = 3):
     llm = Qwen()
+    st.session_state.llm = llm
     st.session_state.debug_log = []
+    st.session_state.refused = False   # reset every run
+    st.session_state.failed_stage = ""
+    # st.session_state.intent_overridden = False
+    
 
     def log(label, content, level="info"):
         st.session_state.debug_log.append({"label": label, "content": str(content), "level": level})
@@ -332,15 +363,39 @@ def run_pipeline(df: pd.DataFrame, df_summary: str, user_prompt: str,
                    
         log("Thinker raw output", raw_thinker)
         plan_json = extract_json(raw_thinker)
+        
+        is_refusal = isinstance(plan_json, dict) and (
+            plan_json.get("refused")
+            or (not str(plan_json.get("chart_type") or "").strip()
+                and not plan_json.get("relevant_columns"))
+        )
+        
+        if is_refusal:
+            st.session_state.refused = True
+            st.session_state.failed_stage = "refused"
+            status.update(label="🧠 Request out of scope", state="error")
+            st.warning(plan_json.get("message") or
+                    "I'm a data visualization agent and can only help create charts from your dataset.")
+            return None, None, None
 
         if plan_json is None:
+            st.session_state.failed_stage = "thinker_parse"
             status.update(label="🧠 Thinker: JSON parse failed", state="error")
             st.error("Could not extract valid JSON from Thinker output.")
             st.code(raw_thinker)
             return None, None, None
 
+        
+        named = [t for t in VALID_CHART_TYPES if re.search(rf"\b{re.escape(t)}\b", user_prompt.lower())]
+        if isinstance(plan_json, dict) and len(named) == 1 and plan_json.get("chart_type") != named[0]:
+            log("Intent override", f"{plan_json.get('chart_type')} -> {named[0]}")
+            plan_json["chart_type"] = named[0]
+            # st.session_state.intent_overridden = True
+            
         ok, reason = validate_plan(plan_json, list(df.columns))
+            
         if not ok:
+            st.session_state.failed_stage = "plan_invalid"
             status.update(label=f"🧠 Thinker: plan invalid — {reason}", state="error")
             st.error(f"Plan validation failed: {reason}")
             st.json(plan_json)
@@ -358,6 +413,7 @@ def run_pipeline(df: pd.DataFrame, df_summary: str, user_prompt: str,
         try:
             raw_coder = llm.coder(df_summary, plan_json, previous_code)
         except Exception as e:
+            st.session_state.failed_stage = "coder_error"
             status.update(label=f"💻 Coder error: {type(e).__name__}", state="error")
             st.error(f"An unexpected error occurred in the Coder agent: {e}")
             return None, None, None
@@ -386,7 +442,8 @@ def run_pipeline(df: pd.DataFrame, df_summary: str, user_prompt: str,
                 raw_debug = ''
                 try:
                     raw_debug = llm.debugger(df_summary, plan_json, final_code, err or "")
-                except LLMError as e:
+                except Exception as e:
+                    st.session_state.failed_stage = "debugger_error"
                     dbg.update(label="🔧 Debugger failed", state="error")
                     st.error("The model service failed. Please try again.")
                     break
@@ -396,6 +453,7 @@ def run_pipeline(df: pd.DataFrame, df_summary: str, user_prompt: str,
                 dbg.update(label=f"🔧 Debugger done — {label}", state="complete")
                 st.code(final_code, language="python")
 
+    st.session_state.failed_stage = st.session_state.failed_stage or "execution"
     st.error(f"🛑 Max retries reached.")
     return None, final_code, plan_json
 
@@ -404,23 +462,40 @@ def run_pipeline(df: pd.DataFrame, df_summary: str, user_prompt: str,
 # BLOCK 6: FEEDBACK LOGGING
 # ==========================================
 
-
-def log_run(run_id, prompt, plan, code, ok, seconds, df, attempts):
+def log_run(run_id, prompt, plan, code, ok, seconds, df, attempts, refine = False, source = ""):
+    
     try:
+        llm = st.session_state.get("llm")
         rec = {
-            "ts": datetime.now(timezone.utc).isoformat(),
+            "date_time": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "run_id": run_id,
-            "sid": st.session_state.sid,
+            "session_id": st.session_state.sid,
             "user": st.session_state.get("user", ""),
             "success": int(ok),
-            "failure_stage": "" if ok else ("plan_or_code" if plan is None else "execution"),
-            "seconds": round(seconds, 1),
-            "attempts": attempts,
+            "failure_stage": "" if ok else st.session_state.get("failed_stage", ""),
+            "time_secs": round(seconds, 1),
+            "named_chart_type": int(any(re.search(rf"\b{re.escape(t)}\b", prompt.lower()) for t in VALID_CHART_TYPES)),
             "chart_type": (plan or {}).get("chart_type", ""),
-            "columns_used": ",".join(map(str, (plan or {}).get("relevant_columns", []))),
-            "n_rows": df.shape[0], "n_cols": df.shape[1],
-            "prompt": prompt, "code": code or "",
+            "num_of_attempts": attempts,
+            # "columns_used": ",".join(map(str, (plan or {}).get("relevant_columns", []))),
+            # "n_rows": df.shape[0], "n_cols": df.shape[1],
+            "refine_chart": int(refine),
+            "data_source": "Example" if str(st.session_state.get("df_name", "")).startswith("example:") else "Upload",   # "Upload" or "Example"
+            "prompt_len": len(prompt.lower()), 
+            "mentions_column": int(any(re.search(rf"\b{re.escape(str(c).lower())}\b", prompt.lower()) for c in df.columns)),
+            "refused" : int(st.session_state.get("refused", False)),
+            "input_tokens" : llm.total_input_tokens if llm else 0,
+            "output_tokens" : llm.total_output_tokens if llm else 0,
+            "used_suggested_prompt" : int(st.session_state.get("used_suggestion", False)),
+            "prompt_version" : PROMPT_VERSION,
+            "rating": None,
+            "rated_ts": None,
+            # "code": code or "",
         }
+        
+        if ok:
+            st.session_state.last_ok_rec = rec
+        
         with open(RUN_LOG, "a") as f:
             f.write(json.dumps(rec) + "\n")
             
@@ -429,10 +504,10 @@ def log_run(run_id, prompt, plan, code, ok, seconds, df, attempts):
         st.session_state.runs_since_last_upload += 1
         
         # 2. Define your batch threshold (e.g., upload every 2 runs)
-        BATCH_THRESHOLD = 2 
+        BATCH_THRESHOLD = 1 
         
         if st.session_state.runs_since_last_upload >= BATCH_THRESHOLD:
-            uploadLogToS3(str(RUN_LOG), "ai-agent-metrics-bucket", "runs.csv")
+            uploadLogToS3(str(RUN_LOG), "ai-agent-metrics-bucket", "mvpruns.csv")
             # Reset the counter after a successful batch upload
             st.session_state.runs_since_last_upload = 0
             print(f"[S3 Sync] Uploaded batch of {BATCH_THRESHOLD} runs to S3.")
@@ -441,18 +516,19 @@ def log_run(run_id, prompt, plan, code, ok, seconds, df, attempts):
         print(f"[log_run failed] {type(e).__name__}: {e}", flush=True)
     
 
-def log_feedback(rating: str, prompt: str, plan: Dict, code: str):
-    entry = {
-        "ts": datetime.now(timezone.utc).isoformat(),
-        "run_id": st.session_state.get("last_run_id", ""),
-        "sid": st.session_state.sid,
-        "user": st.session_state.get("user", ""),
-        "rating": rating,
-    }
+def log_feedback(rating, prompt=None, plan=None, code=None):
+    rec = st.session_state.get("last_ok_rec")
+    if not rec:
+        st.toast("Nothing to rate yet", icon="⚠️")
+        return
+    rated = {**rec,
+             "rating": 1 if rating == "up" else 0,
+             "rated_ts": datetime.now(timezone.utc).isoformat(timespec="seconds")}
     try:
-        with open(FEEDBACK_LOG, "a") as f:
-            f.write(json.dumps(entry) + "\n")
-        st.toast(f"Feedback logged: {rating}", icon="✅")
+        with open(RUN_LOG, "a") as f:
+            f.write(json.dumps(rated) + "\n")
+        uploadLogToS3(str(RUN_LOG), "ai-agent-metrics-bucket", "mvpruns.csv")
+        st.toast("Thanks for the feedback!", icon="✅")
     except Exception as e:
         st.toast(f"Feedback log failed: {e}", icon="⚠️")
 
@@ -498,8 +574,8 @@ def make_example_dataset(name: str) -> Tuple[pd.DataFrame, str]:
 # ==========================================
 st.title("📊 Visualize your data in just a few steps!")
 st.info("Upload a dataset, describe the chart you want (BE AS SPECIFIC AS POSSIBLE. e.g. mention chart types for better results), and iterate. Three specialized LLM agents (Thinker → Coder → Debugger) collaborate on every request. Powered by Qwen.")
-st.info("ℹ️ Beta: prompts and generated code are logged for calculating metrics, and column names/sample values are sent to a third-party AI model. Please don't upload sensitive data.")
-# st.info("")
+st.warning("ℹ️ Beta: Specific variables are logged for calculating metrics (e.g. prompt length and success rate), and column names/sample values are sent to a third-party AI model (AI providers may retain requests under their own policies). Please don't upload sensitive data.")
+
 
 # Session state init
 for key, default in [("history", []), ("last_plan", None), ("last_code", None),
@@ -517,6 +593,7 @@ def _reset_session_artifacts():
     st.session_state.last_code = None
     st.session_state.last_fig = None
     st.session_state.last_prompt = None
+    st.session_state.last_ok_rec = None
 
 
 def render_chart_panel(container, fig, plan, code, prompt, turn_id):
@@ -556,6 +633,7 @@ def render_chart_panel(container, fig, plan, code, prompt, turn_id):
 
 def suggest_prompts(df: pd.DataFrame) -> list:
     """Generate 3-4 prompt suggestions from the loaded dataframe's column types."""
+    df = df.loc[:, ~df.columns.astype(str).str.startswith(pat = ("Unnamed", "?", "NaN"))]
     numeric = df.select_dtypes(include=np.number).columns.tolist()
     datetime_cols = [c for c in df.columns if 'datetime' in str(df[c].dtype)]
     low_card_cat = [c for c in df.columns
@@ -579,11 +657,17 @@ def suggest_prompts(df: pd.DataFrame) -> list:
     return suggestions[:4]
 
 
+def use_prompt(text: str):
+    st.session_state.user_prompt = text
+    st.session_state.used_suggestion = True
+    
+
 # === SIDEBAR ===
 with st.sidebar:
-    st.header("⚙️ Controls")
+    st.header("⚙️ Generate a visualization using the following steps! ")
 
-    st.markdown("**Step 1. Load data**")
+    st.divider()
+    st.markdown("**Step 1: Load data**")
     source = st.radio("Dataset source", ["Upload", "Example"],
                       horizontal=True, label_visibility="collapsed")
 
@@ -641,13 +725,35 @@ with st.sidebar:
                 pass
         df_loaded = st.session_state.df is not None
 
-    st.divider()
 
-    st.markdown("**Step 2. Describe your chart**")
+    st.divider()
+    st.markdown("**Step 2: Describe your chart**")
+    # Expandable suggested prompts section
+    with st.expander("📝 Suggested prompts"):
+        if st.session_state.df is None:
+            st.caption("Load a dataset in Step 1 to see suggestions.")
+        else:
+            suggestions = suggest_prompts(st.session_state.df)
+            if suggestions:
+                st.markdown("**Click a prompt and autopopulate the text box:**")
+                for i, s in enumerate(suggestions):
+                    # st.markdown(f"- `{s}`")
+                    # st.button(s, key = '▸', use_container_width=True, on_click=lambda s=s: st.session_state.update(user_prompt=s))
+                    # st_copy_button(text = s, before_copy_label = f'▸ {s}', after_copy_label = 'Prompt copied ✅', show_text = False) - Doesn't work on deployed web app
+                    st.button(
+                        f"▸ {s}",
+                        key=f"sugg_{i}",
+                        use_container_width=True,
+                        on_click=use_prompt,
+                        args=(s,),
+                    )
+                st.caption("You can also modify the given prompt, or craft your own 😊.")
+                
     user_prompt = st.text_area(
         "Your request",
         placeholder="e.g. line chart of revenue over time",
         height=100,
+        key="user_prompt",
         label_visibility="collapsed",
         help="Include the chart type and column names when you can. The Thinker picks the right chart based on what you say and what your data looks like.",
     )
@@ -660,23 +766,58 @@ with st.sidebar:
             help="Feeds the last plan + code to the Thinker so follow-up tweaks like 'make the bars red' work without restarting.",
         )
 
-    st.markdown("**Step 3. Run**")
-    run_button = st.button(
-        "🚀 Run Agent",
+    st.divider()
+    st.sidebar.markdown("**Step 3: Run!**")
+    
+    # 1. Wrap your Run button inside a uniquely keyed container
+    run_button = st.sidebar.button(
+        "🚀 Run!",
         use_container_width=True,
         disabled=not df_loaded or not user_prompt.strip(),
         type="primary",
     )
+    
+    # 2. Inject CSS to color it green with a smooth hover effect
+    st.sidebar.markdown("""
+        <style>
+        [data-testid="stSidebar"] button[kind="primary"],
+        [data-testid="stSidebar"] button[data-testid="stBaseButton-primary"],
+        [data-testid="stSidebar"] button[data-testid="baseButton-primary"] {
+            background-color: #2e7d32 !important;
+            border: 1px solid #2e7d32 !important;
+            color: white !important;
+            font-weight: 600 !important;
+        }
+        [data-testid="stSidebar"] button[kind="primary"]:hover,
+        [data-testid="stSidebar"] button[data-testid="stBaseButton-primary"]:hover,
+        [data-testid="stSidebar"] button[data-testid="baseButton-primary"]:hover {
+            background-color: #388e3c !important;
+            border-color: #388e3c !important;
+            color: white !important;
+        }
+        </style>
+    """, unsafe_allow_html=True)
     
     
     MAX_RUNS = 25
     st.session_state.setdefault("runs", 0)
     DAILY_CAP = int(os.getenv("DAILY_CAP", "150"))
     def runs_today() -> int:
+        # if not RUN_LOG.exists(): return 0
+        # today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        # with open(RUN_LOG) as f:
+        #     return sum(1 for line in f if f'"ts": "{today}' in line)
+        
+        # New code:
         if not RUN_LOG.exists(): return 0
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        ids = set()
         with open(RUN_LOG) as f:
-            return sum(1 for line in f if f'"ts": "{today}' in line)
+            for line in f:
+                if f'"date_time": "{today}' in line:
+                    try: ids.add(json.loads(line)["run_id"])
+                    except Exception: pass
+        return len(ids)
 
     over_limit = st.session_state.runs >= MAX_RUNS or runs_today() >= DAILY_CAP
 
@@ -697,27 +838,27 @@ with st.sidebar:
             _reset_session_artifacts()
             st.rerun()
 
-    st.divider()
-    with st.expander("ℹ️ Instructions", expanded=False):
-        st.markdown("""
-        **Workflow**
-        1. **Load data** — upload a file or pick an example.
-        2. **Describe** the chart — mention chart type and column names if you know them. Be as specific as possible.
-        3. **Run** — the agent plans, writes code, and executes it (with up to 3 debug retries).
-        4. **Refine** — tick 🔁 Refine and send a follow-up like "log-scale the y-axis".
+    # st.divider()
+    # with st.expander("ℹ️ Instructions", expanded=False):
+    #     st.markdown("""
+    #     **Workflow**
+    #     1. **Load data** — upload a file or pick an example.
+    #     2. **Describe** the chart — mention chart type and column names if you know them. Be as specific as possible.
+    #     3. **Run** — the agent plans, writes code, and executes it (with up to 3 debug retries).
+    #     4. **Refine** — tick 🔁 Refine and send a follow-up like "log-scale the y-axis".
 
-        **Good prompts**
-        - `line chart of revenue over time`
-        - `scatter plot of height vs weight`
-        - `box plot of exam_score by study_hours`
-        - `distribution of income`
-        - `grouped bar chart of counts by department and satisfaction`
+    #     **Good prompts**
+    #     - `line chart of revenue over time`
+    #     - `scatter plot of height vs weight`
+    #     - `box plot of exam_score by study_hours`
+    #     - `distribution of income`
+    #     - `grouped bar chart of counts by department and satisfaction`
 
-        **Notes**
-        - Generated code is AST-checked and runs under a 30-second timeout.
-        - Downloads (PNG, SVG, Python code) appear with each successful run.
-        - 👍 / 👎 feedback is logged for evaluation.
-        """)
+    #     **Notes**
+    #     - Generated code is AST-checked
+    #     - Downloads (PNG, SVG, Python code) appear with each successful run.
+    #     - 👍 / 👎 feedback is logged for evaluation.
+    #     """)
 
 
 # === MAIN PANEL ===
@@ -728,11 +869,11 @@ chart_area = st.empty()
 
 def render_welcome(container):
     with container.container():
-        st.markdown("### 👋 Welcome")
+        st.markdown("### Welcome! 👋")
         st.markdown(
-            "This tool turns a plain-English description into a publication-ready chart. "
-            "Pick a dataset from the sidebar, tell the agent what you want to see, and iterate "
-            "on follow-ups until the chart is right."
+            "This AI tool turns a plain-English description into a publication-ready chart. "
+            "Pick or upload your own dataset from the sidebar, tell the agent what you want to see, and click 'Run!'. "
+            "You can also iterate on follow-ups until the chart is right."
         )
 
         st.markdown("#### How it works")
@@ -750,7 +891,7 @@ def render_welcome(container):
             "Refine with follow-up prompts like \"log-scale the y-axis\" or \"make the bars red\"."
         )
 
-        st.markdown("#### Built-in examples")
+        st.markdown("#### Built-in examples (select 'Example' button in the sidebar)")
         st.markdown(
             "- 🌸 **Iris** — 150 rows of flower measurements across 3 species. Classic multivariate dataset.\n"
             "- 📈 **Sales timeseries** — 1,095 days of revenue by region with trend, seasonality, and noise.\n"
@@ -766,12 +907,12 @@ def render_ready(container, df):
             f"Loaded **{len(df):,} rows × {len(df.columns)} columns**. "
             "Describe what you want to plot in the sidebar."
         )
-        suggestions = suggest_prompts(df)
-        if suggestions:
-            st.markdown("**Suggested prompts for this dataset:**")
-            for s in suggestions:
-                st.markdown(f"- `{s}`")
-            st.caption("Copy one into the sidebar, tweak it, or write your own.")
+        # suggestions = suggest_prompts(df)
+        # if suggestions:
+        #     st.markdown("**Suggested prompts for this dataset:**")
+        #     for s in suggestions:
+        #         st.markdown(f"- `{s}`")
+        #     st.caption("Copy one into the sidebar, tweak it, or write your own 😊.")
 
 
 # Decide what to show in the chart area BEFORE running the pipeline
@@ -794,6 +935,30 @@ else:
 
 # Data preview — below chart area. Expanded when no chart yet, collapsed once we have one.
 if st.session_state.df is not None:
+    
+    # Expandable instructions section
+    with st.expander("ℹ️ Instructions", expanded=False):
+        st.markdown("""
+        **Workflow**
+        1. **Load data** — upload a file or pick an example.
+        2. **Describe** the chart — mention chart type and column names if you know them. Be as specific as possible.
+        3. **Run** — the agent plans, writes code, and executes it (with up to 3 debug retries).
+        4. **Refine** — tick 🔁 Refine and send a follow-up like "log-scale the y-axis".
+
+        **Example prompts**
+        - `line chart of revenue over time`
+        - `scatter plot of height vs weight`
+        - `box plot of exam_score by study_hours`
+        - `distribution of income`
+        - `grouped bar chart of counts by department and satisfaction`
+
+        **Notes**
+        - Generated code is AST-checked.
+        - Downloads (PNG, SVG, Python code) appear with each successful run.
+        - 👍 / 👎 feedback is logged for evaluation.
+        """)
+        
+    # Expandable dataset preview section
     with st.expander("📋 Data preview", expanded=(st.session_state.last_fig is None)):
         c1, c2, c3 = st.columns(3)
         c1.metric("Rows", f"{len(st.session_state.df):,}")
@@ -804,6 +969,7 @@ if st.session_state.df is not None:
             st.dataframe(st.session_state.df.head(10), use_container_width=True)
         with tab_summary:
             st.code(st.session_state.df_summary)
+    
 
 # Run pipeline — status blocks render HERE and auto-collapse on success
 if run_button and st.session_state.df is not None and user_prompt.strip():
@@ -832,8 +998,8 @@ if run_button and st.session_state.df is not None and user_prompt.strip():
     # exec attempts = failed executions + the successful one (if any)
     attempts = sum(1 for e in st.session_state.get("debug_log", [])
                    if e["label"].startswith("Exec error")) + (1 if fig is not None else 0)
-    log_run(run_id, user_prompt, plan, code, fig is not None, elapsed,
-            st.session_state.df, attempts)
+    log_run(run_id, user_prompt, plan, code, fig is not None, elapsed, st.session_state.df, attempts, refine = refine, source = source)
+    st.session_state.used_suggestion = False
     st.session_state.last_run_id = run_id
     # New code^
 
@@ -854,8 +1020,9 @@ if run_button and st.session_state.df is not None and user_prompt.strip():
         )
         st.toast("Visualization complete", icon="✅")
     else:
-        with chart_area.container():
-            st.error("❌ Could not generate a chart. Expand the pipeline details above to see what happened, then tweak your prompt and try again.")
+        if not st.session_state.get("refused"):
+            with chart_area.container():
+                st.error("❌ Could not generate a chart. Expand the pipeline details above to see what happened, then tweak your prompt and try again.")
 
 # Generated code viewer — collapsed, below everything
 # if st.session_state.last_code:
