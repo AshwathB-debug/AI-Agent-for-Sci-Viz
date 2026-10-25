@@ -464,7 +464,7 @@ def log_run(run_id, prompt, plan, code, ok, seconds, df, attempts, refine = Fals
         rec = {
             "date_time": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "run_id": run_id,
-            "session_id": st.session_state.sid,
+            "session_id": st.session_state.session_id,
             "user": st.session_state.get("user", ""),
             "success": int(ok),
             "failure_stage": "" if ok else st.session_state.get("failed_stage", ""),
