@@ -132,7 +132,7 @@ def uploadLogToS3(local_file_path, s3_bucket_name, s3_file_name):
     s3 = boto3.client('s3', region_name='us-east-2')
     
     try:
-        # 1. Read local JSONL logs
+        # 1. Read local JSONL run logs
         if not Path(local_file_path).exists():
             return
         
@@ -140,31 +140,29 @@ def uploadLogToS3(local_file_path, s3_bucket_name, s3_file_name):
         if local_df.empty:
             return
             
-        # 2. Attempt to download existing file from S3 using the variable s3_file_name
-        s3_df = pd.DataFrame()
-        try:
-            response = s3.get_object(Bucket=s3_bucket_name, Key=s3_file_name)  # ✅ Fixed: dynamic key
-            s3_df = pd.read_csv(io.BytesIO(response['Body'].read()), dtype={"run_id": str, "session_id": str, "user": str})
-        except s3.exceptions.NoSuchKey:
-            # ✅ First time creating mvpruns.csv in S3 - continue execution!
-            print(f"[S3 Info] {s3_file_name} does not exist in S3 yet. Creating new file.")
-        except Exception as e:
-            print(f"[S3 Warning] Error fetching {s3_file_name}: {e}")
+        # 2. Define the exact columns defined in your log_run() rec dictionary
+        allowed_columns = [
+            "date_time", "run_id", "session_id", "user", "success", 
+            "failure_stage", "time_secs", "named_chart_type", "chart_type", 
+            "num_of_attempts", "refine_chart", "data_source", "prompt_len", 
+            "mentions_column", "refused", "input_tokens", "output_tokens", 
+            "used_suggested_prompt", "prompt_version", "rating", "rated_ts"
+        ]
+        
+        # Keep only columns that exist in the current dataframe and match your allowed schema
+        columns_to_keep = [col for col in allowed_columns if col in local_df.columns]
+        clean_df = local_df[columns_to_keep]
 
-        # 3. Combine S3 data and local data, deduplicating on run_id
-        if not s3_df.empty:
-            combined_df = pd.concat([s3_df, local_df], ignore_index=True)
-            if 'run_id' in combined_df.columns:
-                combined_df = combined_df.drop_duplicates(subset=['run_id'], keep='last')
-        else:
-            combined_df = local_df
+        # Deduplicate locally by run_id just in case
+        if 'run_id' in clean_df.columns:
+            clean_df = clean_df.drop_duplicates(subset=['run_id'], keep='last')
 
-        # 4. Write CSV locally and upload to S3
+        # 3. Write directly to a clean temporary local CSV and overwrite S3
         csv_local_path = '/tmp/runs_output.csv'
-        combined_df.to_csv(csv_local_path, index=False)
+        clean_df.to_csv(csv_local_path, index=False)
         
         s3.upload_file(csv_local_path, s3_bucket_name, s3_file_name)
-        print(f"[S3 Sync] Successfully updated {s3_file_name} in bucket {s3_bucket_name} with {len(combined_df)} rows.")
+        print(f"[S3 Sync] Successfully uploaded clean {s3_file_name} with {len(clean_df)} rows.")
 
     except Exception as e:
         print(f"Failed to upload to S3: {e}", flush=True)
