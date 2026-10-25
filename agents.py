@@ -37,7 +37,7 @@ class Qwen:
     """Thinker / Coder / Debugger wrappers around a single loaded Qwen model."""
     def run(self, messages, max_new_tokens = None, temperature = 0.0):
         
-        last_reason, inputTokens, outputTokens = None, 0, 0
+        last_reason = None
         
         for _ in range(2):  # one retry on empty output
             try:
@@ -104,7 +104,7 @@ class Qwen:
         
         Before choosing the chart, fill the "reasoning" field by walking through:
         <reasoning_process>
-        (1) Did the user name a chart type? If yes, that is the chart_type. Skip rule matching and only work out the columns and how to build it.
+        (1) Did the user mention a chart type in the user_prompt? IF YES, that is the chart_type. Skip chart_type_rules and only work out the columns and how to build it.
         (2) What is the x-axis column? dtype, unique count, and is it ordered/temporal/categorical/continuous?
         (3) What is the y-axis column? dtype, continuous or categorical?
         (4) How many rows per x-value (duplicates? one-per-x?)?
@@ -302,7 +302,7 @@ class Qwen:
             include rows where the entity appears in EITHER column, e.g.
             df[(df['Team_A'].isin(teams)) | (df['Team_B'].isin(teams))].
         17. TYPE SAFETY FOR AGGREGATION: NEVER call `.mean()`, `.sum()`, or numeric aggregations on text/string object columns. If you are grouping by a text category to see distributions or frequencies, use `.size().unstack()` or `.value_counts()` instead of numeric mean operations.
-        18. DATETIME FILTERING: If a date column has been parsed as datetime64, NEVER use `.str.startswith()` or string methods on it. Instead, use pandas datetime accessors or filtering (e.g. `(df['Date'].dt.year == 2026) & (df['Date'].dt.month == 2)`).
+        18. DATETIME FILTERING: If a date column has been parsed as datetime64, NEVER use `.str.startswith()` or string methods on it. Instead, use pandas datetime accessors or filtering (e.g. `(df['Date'].dt.year == 2026) & (df['Date'].dt.month
         {refinement_block}
         </critical_rules>
         

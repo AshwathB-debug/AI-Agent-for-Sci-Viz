@@ -275,7 +275,13 @@ def safe_exec(code: str, df: pd.DataFrame, timeout_s: int = 30) -> Tuple[Optiona
             figs = [plt.figure(n) for n in plt.get_fignums()]
             good = [f for f in figs if has_content(f)]
             if not good:
-                return None, "Code ran but produced no plot with data."
+                n = len(plt.get_fignums())
+                empty = any(a.lines and all(len(l.get_xdata()) == 0 for l in a.lines)
+                            for f in figs for a in f.axes)
+                hint = (" The plot has 0 data points: a filter probably returned zero rows. "
+                        "Check the date format and parse dates with pd.to_datetime(..., errors='coerce') "
+                        "before filtering, instead of using string matching.") if empty else ""
+                return None, f"Code ran but no plot had visible data (open figures: {n}).{hint}"
             fig = good[-1]
 
             try:
@@ -659,7 +665,8 @@ def use_prompt(text: str):
 
 # === SIDEBAR ===
 with st.sidebar:
-    st.header("⚙️ Generate a visualization using the following steps! ")
+    st.header("⚙️ Sidebar ")
+    st.caption("Generate a visualization using the following steps!")
 
     st.divider()
     st.markdown("**Step 1: Load data**")
@@ -892,6 +899,12 @@ def render_welcome(container):
             "- 📈 **Sales timeseries** — 1,095 days of revenue by region with trend, seasonality, and noise.\n"
             "- 📊 **Survey** — 500 employees with age, income, satisfaction, and department fields."
         )
+        st.markdown("#### What happens after a chart is generated?")
+        st.markdown(
+            "- Downloads (PNG, SVG, Python code) appear with each successful run.\n"
+            "- Expandable containers (e.g. Instructions, Data Preview, and Agent outputs will be provided for your reference.\n"
+            "- 👍 / 👎 feedback is logged for evaluation. Make sure to click it until you get a notification on the top right, so it gets logged for us to gauge metrics 😊. Thank you!\n"
+        )
         st.caption("→ Open the sidebar, choose **Example**, pick one, and click **Load example**.")
 
 
@@ -928,11 +941,29 @@ elif st.session_state.last_fig is not None:
 else:
     render_ready(chart_area, st.session_state.df)
 
+
+# Inject custom CSS to increase the expander header font size
+st.markdown(
+    """
+    <style>
+    /* Targets the paragraph text inside the expander instructions header */
+    .st-key-instructions details summary p,
+    .st-key-data_preview details summary p,
+    .st-key-convo_history details summary p,
+    .st-key-debug_log details summary p {
+        font-size: 1.2rem !important; /* Change to your desired size (e.g., 24px, 1.5rem) */
+        font-weight: bold;         /* Optional: makes the text bold */
+    }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
+
 # Data preview — below chart area. Expanded when no chart yet, collapsed once we have one.
 if st.session_state.df is not None:
     
     # Expandable instructions section
-    with st.expander("ℹ️ Instructions", expanded=False):
+    with st.expander("ℹ️ Instructions", expanded=False, key="instructions"):
         st.markdown("""
         **Workflow**
         1. **Load data** — upload a file or pick an example.
@@ -950,11 +981,11 @@ if st.session_state.df is not None:
         **Notes**
         - Generated code is AST-checked.
         - Downloads (PNG, SVG, Python code) appear with each successful run.
-        - 👍 / 👎 feedback is logged for evaluation.
+        - 👍 / 👎 feedback is logged for evaluation. Make sure to click it until you get a notification on the top right, so it gets logged for us to gauge metrics 😊. Thank you!
         """)
         
     # Expandable dataset preview section
-    with st.expander("📋 Data preview", expanded=(st.session_state.last_fig is None)):
+    with st.expander("📋 Data preview", expanded=(st.session_state.last_fig is None), key='data_preview'):
         c1, c2, c3 = st.columns(3)
         c1.metric("Rows", f"{len(st.session_state.df):,}")
         c2.metric("Columns", len(st.session_state.df.columns))
@@ -1025,8 +1056,8 @@ if run_button and st.session_state.df is not None and user_prompt.strip():
 #         st.code(st.session_state.last_code, language="python")
 
 # History panel
-if st.session_state.history:
-    with st.expander(f"🕘 Conversation history ({len(st.session_state.history)} turns)", expanded=False):
+if st.session_state.history:     
+    with st.expander(f"🕘 Conversation history ({len(st.session_state.history)} turns)", expanded=False, key="convo_history"):
         for i, turn in enumerate(reversed(st.session_state.history), 1):
             turn_num = len(st.session_state.history) - i + 1
             st.markdown(f"**Turn {turn_num}:** {turn['prompt']}")
@@ -1035,7 +1066,7 @@ if st.session_state.history:
 
 # Debug panel
 if st.session_state.get("debug_log"):
-    with st.expander("🪲 Debug log (raw LLM output)", expanded=False):
+    with st.expander("🪲 Debug log (raw LLM output)", expanded=False, key="debug_log"):
         for entry in st.session_state.debug_log:
             icon = "🔴" if entry["level"] == "error" else "🟢"
             st.markdown(f"**{icon} {entry['label']}**")
