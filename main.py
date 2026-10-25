@@ -522,8 +522,8 @@ def log_feedback(rating, prompt=None, plan=None, code=None):
     try:
         with open(RUN_LOG, "a") as f:
             f.write(json.dumps(rated) + "\n")
+        st.toast("Thank you for the feedback!", icon="✅")
         uploadLogToS3(str(RUN_LOG), "ai-agent-metrics-bucket", "mvpruns.csv")
-        st.toast("Thanks for the feedback!", icon="✅")
     except Exception as e:
         st.toast(f"Feedback log failed: {e}", icon="⚠️")
 
