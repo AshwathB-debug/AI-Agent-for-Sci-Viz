@@ -19,6 +19,13 @@ client = OpenAI(
     max_retries = 3, # retries transient errors like 429/5xx with backoff
 )
 
+client2 = OpenAI(
+    base_url = "https://router.huggingface.co/v1",
+    api_key = os.environ["APIKEY"],
+    timeout = 60,
+    max_retries = 3, # retries transient errors like 429/5xx with backoff
+)
+
 
 
 class LLMError(RuntimeError):
@@ -35,7 +42,7 @@ class Qwen:
     
     
     """Thinker / Coder / Debugger wrappers around a single loaded Qwen model."""
-    def run(self, messages, max_new_tokens = None, temperature = 0.0):
+    def run(self, messages, max_new_tokens = None, temperature = None):
         
         last_reason = None
         
@@ -43,6 +50,36 @@ class Qwen:
             try:
                 response = client.chat.completions.create(
                     model="Qwen/Qwen3-32B:cheapest", messages=messages,
+                    max_tokens=max_new_tokens, temperature=temperature,
+                    extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+                )
+            except Exception as e:
+                raise LLMError(f"{type(e).__name__}: {e}") from e
+            if not response.choices or not response.choices[0].message:
+                raise LLMError("Empty or malformed response from API.")
+            choice = response.choices[0]
+            last_reason = choice.finish_reason
+            if response.usage:
+                # self.usage_log.append({"prompt": response.usage.prompt_tokens,
+                #                     "completion": response.usage.completion_tokens,
+                #                     "finish_reason": last_reason})
+                self.total_input_tokens += response.usage.prompt_tokens or 0
+                self.total_output_tokens += response.usage.completion_tokens or 0
+                
+            text = self._clean(choice.message.content) or ""
+            if text:
+                return text
+        raise LLMError(f"Empty completion (finish_reason={last_reason})")
+    
+    
+    def run2(self, messages, max_new_tokens = None, temperature = None):
+            
+        last_reason = None
+        
+        for _ in range(2):  # one retry on empty output
+            try:
+                response = client2.chat.completions.create(
+                    model="Qwen/Qwen2.5-Coder-32B-Instruct:nscale", messages=messages,
                     max_tokens=max_new_tokens, temperature=temperature,
                     extra_body={"chat_template_kwargs": {"enable_thinking": False}},
                 )
@@ -302,7 +339,7 @@ class Qwen:
             include rows where the entity appears in EITHER column, e.g.
             df[(df['Team_A'].isin(teams)) | (df['Team_B'].isin(teams))].
         17. TYPE SAFETY FOR AGGREGATION: NEVER call `.mean()`, `.sum()`, or numeric aggregations on text/string object columns. If you are grouping by a text category to see distributions or frequencies, use `.size().unstack()` or `.value_counts()` instead of numeric mean operations.
-        18. DATETIME FILTERING: If a date column has been parsed as datetime64, NEVER use `.str.startswith()` or string methods on it. Instead, use pandas datetime accessors or filtering (e.g. `(df['Date'].dt.year == 2026) & (df['Date'].dt.month
+        18. DATETIME FILTERING: If a date column has been parsed as datetime64, NEVER use `.str.startswith()` or string methods on it. Instead, use pandas datetime accessors or filtering (e.g. `(df['Date'].dt.year == 2026) & (df['Date'].dt.month))
         {refinement_block}
         </critical_rules>
         
@@ -318,7 +355,7 @@ class Qwen:
         </assistant_turn>
         """
         
-        return self.run([{"role": "user", "content": system_msg}], max_new_tokens = 2000, temperature=0.0)
+        return self.run2([{"role": "user", "content": system_msg}], max_new_tokens = 2000, temperature=0.0)
 
 
     def debugger(self, df_summary: str, plan_json: Dict, failed_code: str, error_msg: str) -> str:
@@ -360,7 +397,7 @@ class Qwen:
         Output the corrected full script."""
 
         # Slightly higher temp so it tries different approaches on repeat failures
-        return self.run(
+        return self.run2(
             [{"role": "system", "content": system_msg},
             {"role": "user", "content": user_msg}],
             max_new_tokens = 2000,
