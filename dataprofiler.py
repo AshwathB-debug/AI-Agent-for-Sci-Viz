@@ -5,7 +5,9 @@
 from config import Union, Dict, Any, Optional, Tuple, List
 from pathlib import Path
 import pandas as pd
+import json
 import numpy as np
+import openpyxl, xlrd
 
 
 class DataProfiler:
@@ -42,10 +44,22 @@ class DataProfiler:
             if self.format == '.csv':
                 self.df = pd.read_csv(self.filepath, **read_kwargs)
             elif self.format == '.json':
-                self.df = pd.read_json(self.filepath, **read_kwargs)
+                try:
+                    self.df = pd.read_json(self.filepath, **read_kwargs)
+                except Exception:
+                    # Fallback for nested JSON, dict-of-dicts, or non-standard orientations
+                    with open(self.filepath, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                    if isinstance(data, list):
+                        self.df = pd.json_normalize(data)
+                    elif isinstance(data, dict):
+                        # Check if dict values are lists or records
+                        self.df = pd.DataFrame.from_dict(data, orient='index' if not any(isinstance(v, list) for v in data.values()) else 'columns')
+                    else:
+                        self.df = pd.DataFrame([data])
             elif self.format in {'.xlsx', '.xls'}:
                 sheet = read_kwargs.pop('sheet_name', 0)
-                self.df = pd.read_excel(self.filepath, sheet_name=sheet, **read_kwargs)
+                self.df = pd.read_excel(self.filepath, sheet_name=sheet, **read_kwargs, engine = ("openpyxl" if self.format == '.xlsx' else "xlrd"))
             elif self.format == '.txt':
                 delimiter = read_kwargs.pop('delimiter', None)
                 if delimiter is None:

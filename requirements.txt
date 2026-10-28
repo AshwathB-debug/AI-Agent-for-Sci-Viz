@@ -10,3 +10,6 @@ huggingface_hub
 xlrd
 boto3
 st-copy-button
+# Install below stuff to handle xlsx and xls files
+openpyxl # Handles xlsx files
+xlrd # Handles xls files
