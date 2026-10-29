@@ -157,12 +157,31 @@ def uploadLogToS3(local_file_path, s3_bucket_name, s3_file_name):
         if 'run_id' in clean_df.columns:
             clean_df = clean_df.drop_duplicates(subset=['run_id'], keep='last')
 
-        # 3. Write directly to a clean temporary local CSV and overwrite S3
         csv_local_path = '/tmp/runs_output.csv'
-        clean_df.to_csv(csv_local_path, index=False)
-        
+
+        # 3. Check if mvpruns.csv already exists on S3 and merge if it does
+        try:
+            # Try downloading the existing file from S3 to merge records
+            s3.download_file(s3_bucket_name, s3_file_name, csv_local_path)
+            existing_df = pd.read_csv(csv_local_path, dtype={"run_id": str, "session_id": str, "user": str})
+            
+            # Concatenate existing S3 data with the new local logs
+            combined_df = pd.concat([existing_df, clean_df], ignore_index=True)
+            
+            # Deduplicate globally across the historical dataset by run_id (keeping the latest update)
+            if 'run_id' in combined_df.columns:
+                combined_df = combined_df.drop_duplicates(subset=['run_id'], keep='last')
+                
+            final_df = combined_df
+        except Exception:
+            # If the file doesn't exist on S3 yet, just use our clean local df
+            final_df = clean_df
+
+        # 4. Save combined dataset to local temporary path and upload to S3
+        final_df.to_csv(csv_local_path, index=False)
         s3.upload_file(csv_local_path, s3_bucket_name, s3_file_name)
-        print(f"[S3 Sync] Successfully uploaded clean {s3_file_name} with {len(clean_df)} rows.")
+        
+        print(f"[S3 Sync] Successfully appended/updated {s3_file_name} on S3 with total {len(final_df)} rows.")
 
     except Exception as e:
         print(f"Failed to upload to S3: {e}", flush=True)
