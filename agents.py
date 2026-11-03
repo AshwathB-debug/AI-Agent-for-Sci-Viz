@@ -19,12 +19,12 @@ client = OpenAI(
     max_retries = 3, # retries transient errors like 429/5xx with backoff
 )
 
-client2 = OpenAI(
-    base_url = "https://router.huggingface.co/v1",
-    api_key = os.environ["APIKEY"],
-    timeout = 60,
-    max_retries = 3, # retries transient errors like 429/5xx with backoff
-)
+# client2 = OpenAI(
+#     base_url = "https://router.huggingface.co/v1",
+#     api_key = os.environ["APIKEY"],
+#     timeout = 60,
+#     max_retries = 3, # retries transient errors like 429/5xx with backoff
+# )
 
 
 
@@ -72,34 +72,34 @@ class Qwen:
         raise LLMError(f"Empty completion (finish_reason={last_reason})")
     
     
-    def run2(self, messages, max_new_tokens = None, temperature = None):
+    # def run2(self, messages, max_new_tokens = None, temperature = None):
             
-        last_reason = None
+    #     last_reason = None
         
-        for _ in range(2):  # one retry on empty output
-            try:
-                response = client2.chat.completions.create(
-                    model="Qwen/Qwen2.5-Coder-32B-Instruct:nscale", messages=messages,
-                    max_tokens=max_new_tokens, temperature=temperature,
-                    extra_body={"chat_template_kwargs": {"enable_thinking": False}},
-                )
-            except Exception as e:
-                raise LLMError(f"{type(e).__name__}: {e}") from e
-            if not response.choices or not response.choices[0].message:
-                raise LLMError("Empty or malformed response from API.")
-            choice = response.choices[0]
-            last_reason = choice.finish_reason
-            if response.usage:
-                # self.usage_log.append({"prompt": response.usage.prompt_tokens,
-                #                     "completion": response.usage.completion_tokens,
-                #                     "finish_reason": last_reason})
-                self.total_input_tokens += response.usage.prompt_tokens or 0
-                self.total_output_tokens += response.usage.completion_tokens or 0
+    #     for _ in range(2):  # one retry on empty output
+    #         try:
+    #             response = client2.chat.completions.create(
+    #                 model="Qwen/Qwen2.5-Coder-32B-Instruct:nscale", messages=messages,
+    #                 max_tokens=max_new_tokens, temperature=temperature,
+    #                 extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+    #             )
+    #         except Exception as e:
+    #             raise LLMError(f"{type(e).__name__}: {e}") from e
+    #         if not response.choices or not response.choices[0].message:
+    #             raise LLMError("Empty or malformed response from API.")
+    #         choice = response.choices[0]
+    #         last_reason = choice.finish_reason
+    #         if response.usage:
+    #             # self.usage_log.append({"prompt": response.usage.prompt_tokens,
+    #             #                     "completion": response.usage.completion_tokens,
+    #             #                     "finish_reason": last_reason})
+    #             self.total_input_tokens += response.usage.prompt_tokens or 0
+    #             self.total_output_tokens += response.usage.completion_tokens or 0
                 
-            text = self._clean(choice.message.content) or ""
-            if text:
-                return text
-        raise LLMError(f"Empty completion (finish_reason={last_reason})")
+    #         text = self._clean(choice.message.content) or ""
+    #         if text:
+    #             return text
+    #     raise LLMError(f"Empty completion (finish_reason={last_reason})")
         
 
     @staticmethod
@@ -355,7 +355,7 @@ class Qwen:
         </assistant_turn>
         """
         
-        return self.run2([{"role": "user", "content": system_msg}], max_new_tokens = 2000, temperature=0.0)
+        return self.run([{"role": "user", "content": system_msg}], max_new_tokens = 2000, temperature=0.0)
 
 
     def debugger(self, df_summary: str, plan_json: Dict, failed_code: str, error_msg: str) -> str:
@@ -397,7 +397,7 @@ class Qwen:
         Output the corrected full script."""
 
         # Slightly higher temp so it tries different approaches on repeat failures
-        return self.run2(
+        return self.run(
             [{"role": "system", "content": system_msg},
             {"role": "user", "content": user_msg}],
             max_new_tokens = 2000,
