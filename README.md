@@ -7,7 +7,9 @@
 - **Hunter Smith**
 - **Devin Veasna**
 
-## Summary
+## This project is a fork from the original. I've made some changes to make it deployment-ready.
+
+## Summary 
 
 This project aims to develop an AI Agent that automates the process of creating scientific visualizations from raw data. The AI Agent will analyze structured numerical data, such as data frames or experimental results, and generate appropriate visualizations (e.g., pie charts, line plots, bar graphs) based on the nature of the data and user preferences. The goal is to make data analysis more accessible and efficient for users, such as researchers or decision-makers, who may not have extensive programming expertise.
 
